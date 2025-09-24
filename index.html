@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>SPIN Coach — Live</title>
+<style>
+  body{margin:0;background:#0b0b0c;color:#e9e9ea;font-family:system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{padding:16px;max-width:700px;margin:0 auto}
+  h1{font-size:18px;margin:8px 0 12px}
+  button{padding:12px 16px;border:0;border-radius:12px;background:#2a2a2e;color:#fff;font-weight:700}
+  .row{display:flex;gap:8px;margin:10px 0}
+  .q{margin:10px 0;padding:12px;border-radius:12px;background:#16161a;line-height:1.25;font-size:16px}
+  .muted{opacity:.75;font-size:12px}
+  #qs{margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SPIN Coach — live (texte)</h1>
+  <div class="muted">Clique “Démarrer”, autorise le micro. Pose l’iPhone près du haut-parleur de la réunion.</div>
+  <div class="row">
+    <button id="start">🎙️ Démarrer</button>
+    <button id="stop" disabled>⏹️ Stop</button>
+  </div>
+  <div id="status" class="muted">Prêt.</div>
+  <div id="qs"></div>
+</div>
+
+<script>
+let pc, micStream, dataChannel;
+let running = false;
+
+function renderSuggestions(textBlob){
+  const box = document.getElementById('qs');
+  const lines = textBlob.split('\n').map(x=>x.trim()).filter(Boolean).slice(0,3);
+  box.innerHTML = lines.map(l=>`<div class="q">${l}</div>`).join('');
+}
+
+async function getEphemeralKey(){
+  const r = await fetch("/api/token", { method: "POST" });
+  if(!r.ok) throw new Error("Token server error");
+  const j = await r.json();
+  return j.client_secret.value; // clé éphémère renvoyée par l’API Realtime
+}
+
+async function start(){
+  if(running) return;
+  running = true;
+  document.getElementById('status').textContent = "Initialisation…";
+  document.getElementById('start').disabled = true;
+  document.getElementById('stop').disabled = false;
+
+  const EPHEMERAL_KEY = await getEphemeralKey();
+
+  pc = new RTCPeerConnection();
+  dataChannel = pc.createDataChannel("oai-events");
+  dataChannel.onmessage = (ev)=>{
+    try{
+      const msg = JSON.parse(ev.data);
+      if(msg.type === "response.output_text.delta"){
+        const prev = (window._accText || "");
+        window._accText = prev + msg.delta;
+        renderSuggestions(window._accText);
+      }
+      if(msg.type === "response.completed"){
+        window._accText = "";
+      }
+    }catch(_){}
+  };
+
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  for (const track of micStream.getTracks()) pc.addTrack(track, micStream);
+
+  pc.oniceconnectionstatechange = () => {
+    document.getElementById('status').textContent = "État RTC: " + pc.iceConnectionState;
+  };
+
+  const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
+  await pc.setLocalDescription(offer);
+
+  const baseUrl = "https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17";
+  const sdpResp = await fetch(baseUrl, {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + EPHEMERAL_KEY, "Content-Type": "application/sdp" },
+    body: offer.sdp
+  });
+  const answer = { type: "answer", sdp: await sdpResp.text() };
+  await pc.setRemoteDescription(answer);
+
+  const spinInit = {
+    type: "response.create",
+    response: {
+      instructions: "Coach SPIN armé. Fournis 2–3 questions courtes [S]/[P]/[I]/[N] selon les derniers propos transcrits.",
+      modalities: ["text"],
+      conversation: "default"
+    }
+  };
+  dataChannel.onopen = ()=> dataChannel.send(JSON.stringify(spinInit));
+
+  document.getElementById('status').textContent = "En écoute…";
+}
+
+async function stop(){
+  running = false;
+  document.getElementById('start').disabled = false;
+  document.getElementById('stop').disabled = true;
+  document.getElementById('status').textContent = "Arrêté.";
+  if (micStream) micStream.getTracks().forEach(t=>t.stop());
+  if (pc) pc.close();
+  window._accText = "";
+  document.getElementById('qs').innerHTML = "";
+}
+
+document.getElementById('start').onclick = start;
+document.getElementById('stop').onclick = stop;
+</script>
+</body>
+</html>
